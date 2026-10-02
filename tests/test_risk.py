@@ -1,5 +1,5 @@
-from decimal import Decimal
 import unittest
+from decimal import Decimal
 
 from hip3_oracle.config import FeedConfig
 from hip3_oracle.models import AggregatePrice, MarketStatus

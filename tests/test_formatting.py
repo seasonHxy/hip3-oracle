@@ -1,5 +1,5 @@
-from decimal import Decimal
 import unittest
+from decimal import Decimal
 
 from hip3_oracle.formatting import PriceFormatError, format_hip3_price
 

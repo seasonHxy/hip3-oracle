@@ -13,5 +13,8 @@
   "statusPath": "data.session",
   "statusMap": { "regular": "open", "closed": "closed" },
   "timeoutMs": 1500,
+  "maxRetries": 1,
+  "retryDelayMs": 100,
+  "minRequestIntervalMs": 250,
   "maxResponseBytes": 1000000
 }

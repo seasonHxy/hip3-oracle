@@ -6,7 +6,6 @@ from typing import Iterable
 from .config import FeedConfig
 from .models import AggregatePrice, MarketStatus, Quote, RejectedQuote
 
-
 BPS = Decimal("10000")
 
 
@@ -30,7 +29,7 @@ def weighted_quantile(quotes: list[Quote], quantile: Decimal, *, key=lambda quot
 
 def _market_status(quotes: Iterable[Quote]) -> MarketStatus:
     statuses = {quote.market_status for quote in quotes}
-    if MarketStatus.OPEN in statuses and MarketStatus.CLOSED in statuses:
+    if MarketStatus.UNKNOWN in statuses or len(statuses) != 1:
         return MarketStatus.UNKNOWN
     if MarketStatus.CLOSED in statuses:
         return MarketStatus.CLOSED
@@ -55,6 +54,7 @@ class PriceAggregator:
 
         self._require_quorum(feed, accepted, "before outlier filtering")
         grouped = self._collapse_groups(accepted)
+        self._require_weight_balance(feed, grouped, "before outlier filtering")
         center = weighted_quantile(grouped, Decimal("0.5"))
         deviations = [
             Quote(
@@ -86,6 +86,7 @@ class PriceAggregator:
             if quote.independence_group in rejected_groups
         )
         self._require_quorum(feed, filtered, "after outlier filtering")
+        self._require_weight_balance(feed, filtered_groups, "after outlier filtering")
 
         price = weighted_quantile(filtered_groups, Decimal("0.5"))
         q25 = weighted_quantile(filtered_groups, Decimal("0.25"))
@@ -109,6 +110,16 @@ class PriceAggregator:
             sources=tuple(sorted(quote.source for quote in filtered)),
             rejected=tuple(rejected),
         )
+
+    @staticmethod
+    def _require_weight_balance(feed: FeedConfig, groups: list[Quote], stage: str) -> None:
+        total = sum((quote.weight for quote in groups), Decimal(0))
+        for quote in groups:
+            if quote.weight * BPS > total * feed.max_group_weight_share_bps:
+                raise AggregationError(
+                    f"{feed.coin} group {quote.independence_group} exceeds "
+                    f"maxGroupWeightShareBps={feed.max_group_weight_share_bps} {stage}"
+                )
 
     @staticmethod
     def _collapse_groups(quotes: list[Quote]) -> list[Quote]:
@@ -149,6 +160,8 @@ class PriceAggregator:
             return "future timestamp"
         if now_ms - quote.observed_at_ms > feed.max_source_age_ms:
             return "stale timestamp"
+        if quote.observed_at_ms < 0 or quote.received_at_ms < 0:
+            return "negative timestamp"
         if quote.bid is not None or quote.ask is not None:
             if quote.bid is None or quote.ask is None:
                 return "bid and ask must be supplied together"

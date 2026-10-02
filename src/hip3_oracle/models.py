@@ -25,6 +25,20 @@ class Quote:
     bid: Decimal | None = None
     ask: Decimal | None = None
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "coin": self.coin,
+            "source": self.source,
+            "independenceGroup": self.independence_group,
+            "price": str(self.price),
+            "observedAtMs": self.observed_at_ms,
+            "receivedAtMs": self.received_at_ms,
+            "weight": str(self.weight),
+            "marketStatus": self.market_status.value,
+            "bid": str(self.bid) if self.bid is not None else None,
+            "ask": str(self.ask) if self.ask is not None else None,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class RejectedQuote:

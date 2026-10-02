@@ -1,0 +1,23 @@
+groups:
+  - name: hip3-oracle
+    rules:
+      - alert: Hip3OracleUnreachable
+        expr: up{job="hip3-oracle"} == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "HIP-3 oracle monitoring is unreachable"
+      - alert: Hip3OracleNotReady
+        expr: hip3_oracle_ready == 0 and on(job, instance) hip3_oracle_live_mode == 1
+        for: 6s
+        labels:
+          severity: critical
+        annotations:
+          summary: "HIP-3 oracle is live but not ready to publish"
+      - alert: Hip3OracleUncertainPublication
+        expr: increase(hip3_oracle_cycles_total{status="uncertain"}[30s]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pending publication requires operator reconciliation"

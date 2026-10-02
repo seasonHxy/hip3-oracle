@@ -5,6 +5,14 @@
   "dryRun": true,
   "stateFile": "../state/oracle-state.json",
   "markPriceSets": 0,
+  "sourceTimeoutMs": 2000,
+  "publishTimeoutMs": 5000,
+  "monitoring": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 9108,
+    "readinessMaxAgeMs": 10000
+  },
   "sources": {
     "venue-a": {
       "kind": "static",
@@ -42,6 +50,7 @@
       "sources": ["venue-a", "venue-b", "venue-c", "bad-outlier"],
       "minSources": 3,
       "minIndependentGroups": 3,
+      "maxGroupWeightShareBps": "4000",
       "maxSourceAgeMs": 5000,
       "maxFutureMs": 1000,
       "maxSpreadBps": "50",

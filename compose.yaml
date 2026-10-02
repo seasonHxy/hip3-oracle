@@ -1,0 +1,25 @@
+name: hip3-oracle
+
+services:
+  oracle:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - oracle-state:/app/state
+      - ./config:/app/config:ro
+    network_mode: host
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9108/livez', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  oracle-state:

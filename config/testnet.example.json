@@ -1,0 +1,50 @@
+{
+  "dex": "demo",
+  "network": "testnet",
+  "intervalMs": 3000,
+  "dryRun": false,
+  "stateFile": "../state/oracle-state.json",
+  "sourceTimeoutMs": 2000,
+  "publishTimeoutMs": 5000,
+  "confirmationAttempts": 3,
+  "confirmationIntervalMs": 200,
+  "markPriceSets": 0,
+  "monitoring": { "enabled": true, "host": "127.0.0.1", "port": 9108, "readinessMaxAgeMs": 10000 },
+  "sources": {
+    "provider-a": {
+      "kind": "json", "independenceGroup": "provider-a", "weight": "1",
+      "url": "https://provider-a.example/quotes/{symbol}",
+      "symbols": { "demo:AAPL": "AAPL" },
+      "headers": { "Authorization": "Bearer ${PROVIDER_A_TOKEN}" },
+      "pricePath": "data.mid", "timestampPath": "data.timestamp", "timestampUnit": "ms",
+      "statusPath": "data.session", "statusMap": { "regular": "open", "closed": "closed" },
+      "timeoutMs": 1000, "maxRetries": 1, "retryDelayMs": 100
+    },
+    "provider-b": {
+      "kind": "json", "independenceGroup": "provider-b", "weight": "1",
+      "url": "https://provider-b.example/quotes/{symbol}",
+      "symbols": { "demo:AAPL": "AAPL" },
+      "headers": { "Authorization": "Bearer ${PROVIDER_B_TOKEN}" },
+      "pricePath": "data.mid", "timestampPath": "data.timestamp", "timestampUnit": "ms",
+      "statusPath": "data.session", "statusMap": { "regular": "open", "closed": "closed" },
+      "timeoutMs": 1000, "maxRetries": 1, "retryDelayMs": 100
+    },
+    "provider-c": {
+      "kind": "json", "independenceGroup": "provider-c", "weight": "1",
+      "url": "https://provider-c.example/quotes/{symbol}",
+      "symbols": { "demo:AAPL": "AAPL" },
+      "headers": { "Authorization": "Bearer ${PROVIDER_C_TOKEN}" },
+      "pricePath": "data.mid", "timestampPath": "data.timestamp", "timestampUnit": "ms",
+      "statusPath": "data.session", "statusMap": { "regular": "open", "closed": "closed" },
+      "timeoutMs": 1000, "maxRetries": 1, "retryDelayMs": 100
+    }
+  },
+  "feeds": [{
+    "coin": "demo:AAPL", "szDecimals": 2,
+    "sources": ["provider-a", "provider-b", "provider-c"],
+    "minSources": 3, "minIndependentGroups": 3, "maxGroupWeightShareBps": "4000",
+    "maxSourceAgeMs": 5000, "maxFutureMs": 1000, "maxSpreadBps": "50",
+    "outlierMadMultiplier": "6", "outlierMinBandBps": "10", "maxConfidenceBps": "20", "maxJumpBps": "1000",
+    "blockWhenMarketClosed": true, "blockWhenMarketUnknown": true
+  }]
+}

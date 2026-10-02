@@ -9,5 +9,6 @@ venv/
 build/
 dist/
 .env
-state/*.json
+state/*
 !state/.gitkeep
+config/*.local.json

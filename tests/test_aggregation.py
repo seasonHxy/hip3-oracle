@@ -1,10 +1,10 @@
-from decimal import Decimal
 import unittest
+from dataclasses import replace
+from decimal import Decimal
 
 from hip3_oracle.aggregation import AggregationError, PriceAggregator
 from hip3_oracle.config import FeedConfig
 from hip3_oracle.models import MarketStatus, Quote
-
 
 NOW = 1_800_000_000_000
 
@@ -35,6 +35,35 @@ def quote(source: str, price: str, *, group: str | None = None, age_ms: int = 0)
 
 
 class AggregationTests(unittest.TestCase):
+    def test_unknown_source_status_is_not_overruled_by_open_sources(self) -> None:
+        quotes = [
+            quote("a", "100"),
+            quote("b", "100.1"),
+            replace(quote("c", "100.2"), market_status=MarketStatus.UNKNOWN),
+        ]
+        result = PriceAggregator().aggregate(feed(), quotes, now_ms=NOW)
+        self.assertIs(result.market_status, MarketStatus.UNKNOWN)
+
+    def test_dominant_group_is_blocked_before_mad(self) -> None:
+        quotes = [replace(quote("a", "500"), weight=Decimal("9")), quote("b", "100"), quote("c", "100.1")]
+        with self.assertRaisesRegex(AggregationError, "maxGroupWeightShareBps.*before"):
+            PriceAggregator().aggregate(feed(), quotes, now_ms=NOW)
+
+    def test_outlier_removal_can_make_a_group_too_dominant(self) -> None:
+        quotes = [
+            replace(quote("a", "100"), weight=Decimal("2")),
+            quote("b", "100.1"),
+            quote("c", "100.2"),
+            quote("bad", "500"),
+        ]
+        with self.assertRaisesRegex(AggregationError, "maxGroupWeightShareBps.*after"):
+            PriceAggregator().aggregate(feed(), quotes, now_ms=NOW)
+
+    def test_source_loss_cannot_bypass_weight_cap(self) -> None:
+        quotes = [replace(quote("a", "100"), weight=Decimal("2")), quote("b", "100.1"), quote("c", "100.2")]
+        with self.assertRaisesRegex(AggregationError, "maxGroupWeightShareBps"):
+            PriceAggregator().aggregate(feed(), quotes, now_ms=NOW)
+
     def test_filters_outlier_and_uses_weighted_median(self) -> None:
         result = PriceAggregator().aggregate(
             feed(),

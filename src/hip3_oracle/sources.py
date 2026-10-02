@@ -19,6 +19,25 @@ class SourceError(RuntimeError):
     pass
 
 
+class TransientSourceError(SourceError):
+    """Only transport failures, 429 and 5xx are safe to retry."""
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None  # Never forward an Authorization header to a redirect target.
+
+
+def _integer_option(options: Mapping[str, Any], name: str, default: int) -> int:
+    value = options.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise SourceError(f"{name} must be an integer")
+    try:
+        return int(value)
+    except ValueError:
+        raise SourceError(f"{name} must be an integer") from None
+
+
 class PriceSource(Protocol):
     name: str
 
@@ -56,7 +75,10 @@ def _extract(data: Any, path: str) -> Any:
     for part in parts:
         if isinstance(value, list):
             try:
-                value = value[int(part)]
+                index = int(part)
+                if index < 0:
+                    raise IndexError
+                value = value[index]
             except (ValueError, IndexError) as exc:
                 raise SourceError(f"JSON path {path!r} does not exist") from exc
         elif isinstance(value, dict) and part in value:
@@ -88,7 +110,7 @@ class StaticSource:
         if not isinstance(self.prices, dict):
             raise SourceError(f"source {self.name}: prices must be an object")
         self.market_status = _status(config.options.get("marketStatus", "open"))
-        self.observed_at_offset_ms = int(config.options.get("observedAtOffsetMs", 0))
+        self.observed_at_offset_ms = _integer_option(config.options, "observedAtOffsetMs", 0)
 
     async def get_quote(self, coin: str) -> Quote:
         if coin not in self.prices:
@@ -121,10 +143,16 @@ class JsonRestSource:
         self.status_path = str(options.get("statusPath", "")) or None
         self.status_map = options.get("statusMap", {})
         self.symbols = options.get("symbols", {})
-        self.timeout_seconds = int(options.get("timeoutMs", 1_500)) / 1000
-        self.max_response_bytes = int(options.get("maxResponseBytes", 1_000_000))
+        self.timeout_seconds = _integer_option(options, "timeoutMs", 1_500) / 1000
+        self.max_response_bytes = _integer_option(options, "maxResponseBytes", 1_000_000)
         self.price_scale = _decimal(options.get("priceScale", "1"), f"source {self.name} priceScale")
         self.headers = options.get("headers", {})
+        self.max_retries = _integer_option(options, "maxRetries", 1)
+        self.retry_delay_seconds = _integer_option(options, "retryDelayMs", 100) / 1000
+        self.min_request_interval_seconds = _integer_option(options, "minRequestIntervalMs", 0) / 1000
+        self._request_lock = asyncio.Lock()
+        self._inflight: asyncio.Task[Quote] | None = None
+        self._last_request_monotonic: float | None = None
         allow_insecure_http = options.get("allowInsecureHttp", False)
         if not isinstance(allow_insecure_http, bool):
             raise SourceError(f"source {self.name}: allowInsecureHttp must be a boolean")
@@ -137,6 +165,10 @@ class JsonRestSource:
             raise SourceError(f"source {self.name}: timeoutMs and maxResponseBytes must be positive")
         if self.price_scale <= 0:
             raise SourceError(f"source {self.name}: priceScale must be positive")
+        if not 0 <= self.max_retries <= 2 or not 0 <= self.retry_delay_seconds <= 1:
+            raise SourceError(f"source {self.name}: maxRetries must be 0-2 and retryDelayMs must be 0-1000")
+        if self.min_request_interval_seconds < 0:
+            raise SourceError(f"source {self.name}: minRequestIntervalMs must be nonnegative")
         if (
             not isinstance(self.symbols, dict)
             or not isinstance(self.headers, dict)
@@ -146,7 +178,24 @@ class JsonRestSource:
         self.status_map = {str(key).lower(): value for key, value in self.status_map.items()}
 
     async def get_quote(self, coin: str) -> Quote:
-        return await asyncio.to_thread(self._get_quote_sync, coin)
+        async with self._request_lock:
+            if self._inflight is not None and not self._inflight.done():
+                raise TransientSourceError(f"source {self.name}: previous request is still in flight")
+            for attempt in range(self.max_retries + 1):
+                if self._last_request_monotonic is not None:
+                    delay = self.min_request_interval_seconds - (time.monotonic() - self._last_request_monotonic)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                self._last_request_monotonic = time.monotonic()
+                try:
+                    self._inflight = asyncio.create_task(asyncio.to_thread(self._get_quote_sync, coin))
+                    self._inflight.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+                    return await asyncio.shield(self._inflight)
+                except TransientSourceError:
+                    if attempt == self.max_retries:
+                        raise
+                    await asyncio.sleep(self.retry_delay_seconds * (attempt + 1))
+        raise SourceError(f"source {self.name}: no quote")  # Unreachable; keeps the return type explicit.
 
     def _get_quote_sync(self, coin: str) -> Quote:
         symbol = str(self.symbols.get(coin, coin))
@@ -155,21 +204,26 @@ class JsonRestSource:
         except (KeyError, ValueError) as exc:
             raise SourceError(f"source {self.name}: invalid URL template") from exc
         parsed = urllib.parse.urlparse(url)
+        if parsed.username or parsed.password or not parsed.hostname:
+            raise SourceError(f"source {self.name}: URL must not contain credentials and needs a host")
         if parsed.scheme != "https":
             local = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-            if not local and not self.allow_insecure_http:
+            if parsed.scheme != "http" or (not local and not self.allow_insecure_http):
                 raise SourceError(f"source {self.name}: non-HTTPS URL refused")
         headers = {str(key): _expand_env(str(value)) for key, value in self.headers.items()}
         headers.setdefault("Accept", "application/json")
         headers.setdefault("User-Agent", "hip3-oracle/0.1")
         request = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=self.timeout_seconds) as response:
                 raw = response.read(self.max_response_bytes + 1)
                 if len(raw) > self.max_response_bytes:
                     raise SourceError(f"source {self.name}: response exceeds size limit")
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise SourceError(f"source {self.name}: request failed: {exc}") from exc
+        except urllib.error.HTTPError as exc:
+            error_type = TransientSourceError if exc.code == 429 or 500 <= exc.code <= 599 else SourceError
+            raise error_type(f"source {self.name}: HTTP {exc.code}") from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            raise TransientSourceError(f"source {self.name}: transport failure") from None
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -187,11 +241,12 @@ class JsonRestSource:
             if self.ask_path
             else None
         )
-        observed_at_ms = (
-            self._parse_timestamp(_extract(data, self.timestamp_path))
-            if self.timestamp_path
-            else received_at_ms
-        )
+        try:
+            observed_at_ms = (
+                self._parse_timestamp(_extract(data, self.timestamp_path)) if self.timestamp_path else received_at_ms
+            )
+        except (ValueError, TypeError, OverflowError, InvalidOperation):
+            raise SourceError(f"source {self.name}: invalid timestamp") from None
         market_status = (
             _status(_extract(data, self.status_path), self.status_map) if self.status_path else MarketStatus.UNKNOWN
         )
