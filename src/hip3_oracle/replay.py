@@ -7,10 +7,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .aggregation import PriceAggregator
 from .config import FeedConfig
 from .models import MarketStatus, Quote
-from .risk import CircuitBreaker, RiskDecision
+from .pipeline import evaluate_quotes
 from .state import StateError
 
 DECIMAL_FIELDS = {
@@ -24,6 +23,8 @@ DECIMAL_FIELDS = {
 
 
 def replay_event(event: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(event.get("feeds"), dict) or not event["feeds"]:
+        raise StateError("evaluated event must contain at least one feed")
     matches: dict[str, bool] = {}
     for coin, recorded in event["feeds"].items():
         raw_feed = dict(recorded["config"])
@@ -47,18 +48,11 @@ def replay_event(event: dict[str, Any]) -> dict[str, Any]:
             )
             for item in recorded["quotes"]
         ]
-        aggregate = None
-        error = None
-        try:
-            aggregate = PriceAggregator().aggregate(feed, quotes, now_ms=recorded["nowMs"])
-            previous = Decimal(recorded["previousPrice"]) if recorded["previousPrice"] is not None else None
-            decision = CircuitBreaker().evaluate(feed, aggregate, previous)
-            if decision.decision is RiskDecision.BLOCK:
-                error = f"circuit breaker: {decision.reason}"
-        except Exception as exc:
-            error = str(exc)
+        previous = Decimal(recorded["previousPrice"]) if recorded["previousPrice"] is not None else None
+        result = evaluate_quotes(feed, quotes, now_ms=recorded["nowMs"], previous_price=previous)
         matches[coin] = (
-            error == recorded["error"] and (aggregate.as_dict() if aggregate else None) == recorded["aggregate"]
+            result.error == recorded["error"]
+            and (result.aggregate.as_dict() if result.aggregate else None) == recorded["aggregate"]
         )
     return {"matches": all(matches.values()), "feeds": matches, "timestampMs": event["timestampMs"]}
 
@@ -70,6 +64,8 @@ def replay_journal(path: Path) -> dict[str, Any]:
         with path.open(encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, 1):
                 event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise StateError("audit journal records must be objects")
                 if event.get("event") == "evaluated":
                     cycles += 1
                     if not replay_event(event)["matches"]:

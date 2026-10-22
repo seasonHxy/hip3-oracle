@@ -212,7 +212,7 @@ class JsonRestSource:
                 raise SourceError(f"source {self.name}: non-HTTPS URL refused")
         headers = {str(key): _expand_env(str(value)) for key, value in self.headers.items()}
         headers.setdefault("Accept", "application/json")
-        headers.setdefault("User-Agent", "hip3-oracle/0.1")
+        headers.setdefault("User-Agent", "hip3-oracle/0.3")
         request = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with urllib.request.build_opener(NoRedirect()).open(request, timeout=self.timeout_seconds) as response:

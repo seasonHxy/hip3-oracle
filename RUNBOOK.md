@@ -9,6 +9,7 @@ ruff format --check src tests
 python -m unittest discover -s tests -v
 hip3-oracle --config config/example.json once
 hip3-oracle replay --journal state/oracle-state.testnet.dry-run.demo.audit.jsonl
+hip3-oracle replay --journal examples/synthetic-replay.jsonl
 ```
 
 Tests never submit a real transaction. SDK compatibility tests generate ephemeral unfunded wallets and mock transport.
@@ -20,7 +21,8 @@ The monitoring HTTP test binds an ephemeral loopback port. Tests without the opt
 2. Confirm provider symbol, price denomination, timestamp semantics, session status and data permission against the contracts.
 3. Run `validate`; it constructs adapters but makes no network calls and does not validate provider credentials.
 4. Use `bootstrap --reason '...'` to read the current DEX oracle into an empty live state. No key required.
-5. Inject updater key and provider tokens through the operational secret manager, then run `once --live`.
+5. Run `preflight` to collect and validate current quotes and the DEX universe without signing or changing state. It does not
+   verify updater permissions and is a point-in-time check. Inject the updater key through the secret manager, then run `once --live`.
 6. Inspect `status=published`, `confirmation.verified=true`, pending cleared, readiness and source metrics.
 7. Run continuously under supervision; monitor `/readyz`, API connectivity and the independent DEX oracle.
 
@@ -64,9 +66,32 @@ The process blocks writes when audit or state persistence fails. Restore disk ca
 restart after investigation. If a request might have been applied, reconcile it first. Scope mismatches and malformed files
 stop startup; the application does not silently reset the reference price.
 
-State v2 stores `scope`, `feeds`, `lastAttemptAtMs` and `pending`. The scoped filename and embedded scope must match the
+State v3 stores `scope`, `feeds`, `lastAttemptAtMs`, `pending` and `pause`. The scoped filename and embedded scope must match the
 network, mode, DEX and endpoint. Legacy v1 files remain untouched; initial Live references must come from the current DEX.
 Do not copy a Dry-run state into Live or Mainnet.
+
+Scoped v2 files load without resetting their references or pending request and upgrade to v3 on the next write. A v2-only
+writer rejects v3; never downgrade or mix updater versions during an incident.
+
+## Local operator controls
+
+`status` reads the state without network requests, signing or creating files; `processHealth=not_observed` is intentional.
+It reports persisted references and pending/pause IDs, not whether a process is running or a quote is fresh.
+
+`pause --reason '...'` persists a local pause, including a unique ID. It is idempotent for an existing pause. The next cycle
+reports `paused` without fetching or signing. A command cannot acquire the write lock during an active cycle; retry after
+the cycle finishes. A local pause is not a market halt or transaction cancellation, and does not fence another host/path.
+
+`resume --pause-id '<id>' --reason '...'` requires the current incident's ID so an old console command cannot clear a later
+pause. It leaves all pending publications and jump references unchanged. Inspect `status` after an I/O error; the audit
+records `control_requested` before the atomic state update and `control_applied` after it. Never infer applied state from
+a requested-only event. Resume may still leave the next cycle `uncertain` until a pending request is reconciled.
+
+`preflight` is a read-only diagnostic command and shares the publishing collector and decision code. It checks scope,
+pause, pending, live bootstrap, source identity/trust metadata, aggregation, risk and complete payload. Live adds the info
+universe/precision query and a final freshness check. It may query providers and consume rate quota; it never creates a
+publisher, writes state/journals, tests a signing key or submits an action. Exit 0 means checks passed at that instant,
+exit 2 means at least one failed. Keep real provider credentials in the runtime secret manager.
 
 ## Deployment
 
@@ -81,6 +106,10 @@ separately. Defaults bind loopback; binding to `0.0.0.0` requires an appropriate
 
 File locking and timing gates protect only a single local state path. Multi-host failover needs an external lease, fencing
 of the previous writer, shared recovery procedure and minimum update spacing. This release does not provide distributed HA.
+
+SIGTERM/SIGINT stop continuous operation after the active cycle completes; interval sleep is interrupted immediately.
+Use a supervisor stop grace period longer than a complete source + publication cycle. Force-killing a process still requires
+the usual pending-publication investigation. The test suite exercises SIGTERM against an actual local Dry-run process.
 
 ## Audit retention
 

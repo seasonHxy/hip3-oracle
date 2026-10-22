@@ -1,3 +1,4 @@
+import json
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -8,6 +9,30 @@ from hip3_oracle.state import JsonStateStore, StateError
 
 
 class StateTests(unittest.TestCase):
+    def test_scoped_v2_state_is_preserved_when_upgraded_to_v3(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            scope = {"mode": "live", "network": "testnet", "dex": "demo"}
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "scope": scope,
+                        "pending": None,
+                        "lastAttemptAtMs": 150,
+                        "feeds": {
+                            "AAPL": {"last_price": "230.2", "last_observed_at_ms": 100, "last_published_at_ms": 200}
+                        },
+                    }
+                )
+            )
+            state = JsonStateStore(path, scope=scope)
+            self.assertIsNone(state.pause)
+            state.save()
+            self.assertEqual(json.loads(path.read_text())["version"], 3)
+            self.assertEqual(state.previous_price("AAPL"), Decimal("230.2"))
+            self.assertEqual(state.last_attempt_at_ms, 150)
+
     def test_cross_environment_state_cannot_be_loaded(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"

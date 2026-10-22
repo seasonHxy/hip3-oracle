@@ -1,3 +1,5 @@
 include LICENSE README.md SECURITY.md RUNBOOK.md CHANGELOG.md Dockerfile compose.yaml .dockerignore
 include config/example.json config/json-source.example.json config/testnet.example.json
 recursive-include deploy *.yml
+recursive-include examples *.md *.jsonl
+recursive-include docs *.md

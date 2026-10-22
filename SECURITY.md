@@ -14,6 +14,10 @@
 - Live sources require upstream timestamps and cannot be Static adapters.
 - Live publication checks DEX universe and szDecimals, and requires readback of all formatted oracle prices.
 - A durable pending record precedes submission. Unknown outcomes block further publishing, including after restart.
+- Persisted local pauses stop future cycles. Resume requires the matching incident ID and cannot clear pending or price references.
+- Schema v3 ensures an older v2-only writer refuses the state instead of ignoring its pause flag.
+- Source name, coin, group and weight are checked against the adapter configuration before accepting a quote.
+- Diagnostics share the publication decision code but never sign or submit; successful preflight does not prove key permissions.
 - Audit/state write errors fail closed. The local file lock prevents overlapping writers of one state file.
 - Transport errors do not log provider URLs or headers. HTTP redirects are refused for JSON sources.
 - Live testnet publishing requires `dryRun=false`, `--live` and an explicit environment acknowledgement; mainnet adds another acknowledgement.

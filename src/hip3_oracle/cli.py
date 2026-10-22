@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import signal
 import sys
 from pathlib import Path
 
 from .config import ConfigError, load_config
+from .control import control, status
+from .diagnostics import preflight
 from .monitoring import MonitoringServer
 from .operations import operate
 from .publisher import DryRunPublisher, PublishError, SdkPublisher
@@ -22,6 +25,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config/example.json", help="path to JSON configuration")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate", help="validate configuration without fetching or publishing")
+    subparsers.add_parser("status", help="inspect the local state snapshot without network access or writes")
+    subparsers.add_parser(
+        "preflight", help="collect quotes and check publication prerequisites without signing or saving"
+    )
+    pause = subparsers.add_parser("pause", help="persist a local publisher pause; does not halt DEX trading")
+    pause.add_argument("--reason", required=True)
+    resume = subparsers.add_parser(
+        "resume", help="clear only the specified local pause; pending requests remain blocked"
+    )
+    resume.add_argument("--reason", required=True)
+    resume.add_argument("--pause-id", required=True)
     once = subparsers.add_parser("once", help="run one aggregation and publishing cycle")
     once.add_argument("--live", action="store_true", help="publish through the official Hyperliquid SDK")
     run = subparsers.add_parser("run", help="run continuously")
@@ -60,10 +74,16 @@ async def _once(config_path: str, live: bool) -> int:
 
 async def _run(config_path: str, live: bool) -> int:
     service = _make_service(config_path, live_flag=live)
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(signum, stop.set)
     try:
         with MonitoringServer(service.monitor):
-            await service.run_forever()
+            await service.run_forever(stop)
     finally:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(signum)
         service.audit.close()
     return 0
 
@@ -94,6 +114,19 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_once(args.config, args.live))
         if args.command == "run":
             return asyncio.run(_run(args.config, args.live))
+        if args.command == "status":
+            print(json.dumps(status(load_config(args.config)), sort_keys=True))
+            return 0
+        if args.command == "preflight":
+            result = asyncio.run(preflight(load_config(args.config)))
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["ok"] else 2
+        if args.command in {"pause", "resume"}:
+            result = control(
+                load_config(args.config), args.command, reason=args.reason, pause_id=getattr(args, "pause_id", None)
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0
         if args.command in {"bootstrap", "reconcile"}:
             print(json.dumps(operate(load_config(args.config), args.command, reason=args.reason), sort_keys=True))
             return 0

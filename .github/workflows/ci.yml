@@ -35,6 +35,11 @@ jobs:
         run: |
           hip3-oracle --config config/example.json validate
           hip3-oracle --config config/testnet.example.json validate
+      - name: Read-only diagnostics and synthetic replay
+        run: |
+          hip3-oracle --config config/example.json status
+          hip3-oracle --config config/example.json preflight
+          hip3-oracle replay --journal examples/synthetic-replay.jsonl
 
   container:
     runs-on: ubuntu-latest

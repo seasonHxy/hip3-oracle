@@ -10,24 +10,14 @@ from .aggregation import PriceAggregator
 from .audit import AuditLog
 from .config import AppConfig, FeedConfig
 from .locking import WriterLock
-from .models import AggregatePrice, Quote
+from .models import Quote
 from .monitoring import RuntimeMonitor
+from .pipeline import FeedCycle, fetch_quote, process_feed
 from .publisher import Publisher, PublishError, PublishUncertainError, build_payload
 from .readback import wire_coin
-from .risk import CircuitBreaker, RiskDecision
+from .risk import CircuitBreaker
 from .sources import PriceSource
 from .state import JsonStateStore, StateError
-
-
-@dataclass(frozen=True, slots=True)
-class FeedCycle:
-    coin: str
-    aggregate: AggregatePrice | None
-    error: str | None
-    source_errors: Mapping[str, str]
-    quotes: tuple[Quote, ...] = ()
-    evaluated_at_ms: int = 0
-    previous_price: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +100,10 @@ class OracleService:
             return result
 
     async def _cycle(self) -> CycleResult:
+        if self.state.pause is not None:
+            return CycleResult(
+                False, "operator pause is active; resume with the matching pause ID", {}, status="paused"
+            )
         if self.state.pending is not None:
             return CycleResult(
                 False, "unresolved publication; run reconcile before publishing again", {}, status="uncertain"
@@ -202,55 +196,28 @@ class OracleService:
         return CycleResult(True, status, feeds, response, status=status)
 
     async def _fetch(self, feed: FeedConfig, source_name: str) -> Quote:
-        started = time.monotonic()
-        failed = True
-        try:
-            result = await asyncio.wait_for(
-                self.sources[source_name].get_quote(feed.coin), timeout=self.config.source_timeout_ms / 1000
-            )
-            failed = False
-            return result
-        finally:
-            self.monitor.record_source(feed.coin, source_name, time.monotonic() - started, failed=failed)
+        return await fetch_quote(self.config, feed, source_name, self.sources, self.monitor)
 
     async def _process_feed(self, feed: FeedConfig) -> FeedCycle:
-        tasks = [self._fetch(feed, source_name) for source_name in feed.sources]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        quotes: list[Quote] = []
-        source_errors: dict[str, str] = {}
-        for source_name, result in zip(feed.sources, results, strict=True):
-            if isinstance(result, asyncio.CancelledError):
-                raise result
-            if isinstance(result, BaseException):
-                source_errors[source_name] = "source timeout" if isinstance(result, TimeoutError) else str(result)
-            else:
-                quotes.append(result)
-        now_ms = int(time.time() * 1000)
-        previous_price = self.state.previous_price(feed.coin)
-        try:
-            aggregate = self.aggregator.aggregate(feed, quotes, now_ms=now_ms)
-            decision = self.circuit_breaker.evaluate(feed, aggregate, previous_price)
-            if decision.decision is RiskDecision.BLOCK:
-                return FeedCycle(
-                    feed.coin,
-                    aggregate,
-                    f"circuit breaker: {decision.reason}",
-                    source_errors,
-                    tuple(quotes),
-                    now_ms,
-                    previous_price,
-                )
-            return FeedCycle(feed.coin, aggregate, None, source_errors, tuple(quotes), now_ms, previous_price)
-        except Exception as exc:
-            return FeedCycle(feed.coin, None, str(exc), source_errors, tuple(quotes), now_ms, previous_price)
+        return await process_feed(
+            feed,
+            self._fetch,
+            previous_price=self.state.previous_price(feed.coin),
+            aggregator=self.aggregator,
+            circuit_breaker=self.circuit_breaker,
+        )
 
-    async def run_forever(self) -> None:
-        while True:
+    async def run_forever(self, stop_event: asyncio.Event | None = None) -> None:
+        stop_event = stop_event or asyncio.Event()
+        while not stop_event.is_set():
             started = time.monotonic()
             result = await self.cycle()
             print(self._summary(result), flush=True)
             elapsed = time.monotonic() - started
-            await asyncio.sleep(max(0, self.config.interval_ms / 1000 - elapsed))
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(0, self.config.interval_ms / 1000 - elapsed))
+            except TimeoutError:
+                pass
 
     @staticmethod
     def _summary(result: CycleResult) -> str:

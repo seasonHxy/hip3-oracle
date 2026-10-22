@@ -3,7 +3,7 @@
 面向 Hyperliquid HIP-3 永续合约的多数据源预言机库。它把采集、异常过滤、聚合、风险控制与
 `perpDeploy.setOracle` 发布拆开，并在任何 feed 不满足安全条件时拒绝整个批次。
 
-0.2.0 提供可本地验证的运行底座：环境隔离、权重保护、发布回读确认、持久化待核对记录、监控、审计回放
+0.3.0 提供环境隔离、权重保护、发布回读确认、持久化待核对记录、监控、审计回放、暂停/恢复、只读预检
 和容器部署模板。真实行情配置中的供应商地址仍是占位符；尚未完成具体 DEX 的 Testnet 联调和主网验证。
 
 ## 已实现
@@ -27,6 +27,9 @@
 - 本地文件单写者锁、结构化 JSON 日志、健康检查、Prometheus 指标和告警模板
 - 报价与决策 JSONL 审计及无网络的确定性回放
 - Docker / Compose 模板、单元与故障测试、真实 SDK 离线签名兼容性测试
+- 持久化本地暂停、带暂停 ID 的恢复、只读状态查看和无密钥预发布检查
+- SIGTERM/SIGINT 平滑退出，保留当前周期的确认或 Pending 结果
+- 六种明确标注为模拟数据的回放场景和发布验证记录
 
 ## 数据流
 
@@ -74,6 +77,8 @@ source .venv/bin/activate
 python -m pip install -e .
 
 hip3-oracle --config config/example.json validate
+hip3-oracle --config config/example.json status
+hip3-oracle --config config/example.json preflight
 hip3-oracle --config config/example.json once
 python -m unittest discover -s tests -v
 ```
@@ -155,6 +160,7 @@ hip3-oracle --config config/testnet.local.json validate
 
 # 只查询 info，建立跳价参考；此命令无需私钥。
 hip3-oracle --config config/testnet.local.json bootstrap --reason 'initial Testnet oracle reference'
+hip3-oracle --config config/testnet.local.json preflight
 
 # 通过密钥管理器注入 HIP3_PRIVATE_KEY 与行情 Token；此处不填写真实密钥。
 export HIP3_ENABLE_LIVE='YES'
@@ -197,7 +203,7 @@ state/oracle-state.testnet.live.demo.json
 state/oracle-state.mainnet.live.demo.json
 ```
 
-保存的是格式化后的已发送价格。v1 文件不自动导入 v2 的 Live 状态，旧文件保留原样；首次 Live 必须通过
+保存的是格式化后的已发送价格。v1 文件不自动导入带 scope 的 Live 状态，旧文件保留原样；首次 Live 必须通过
 `bootstrap` 从 DEX Oracle 建立参考。跳价超限会持续阻塞，bootstrap 拒绝覆盖已有价格。
 
 Live 在请求之前持久化 Pending；API `ok` 加完整价格回读一致才提交状态。超时、未知响应、回读失败或磁盘
@@ -210,6 +216,30 @@ hip3-oracle --config config/testnet.local.json reconcile --reason 'investigated 
 `reconcile` 只读 info，不签名，不发送 setOracle；只有全部待核对价格匹配才更新本地状态。
 价格回读不是交易包含证明；重复同价更新无法仅凭 `oraclePx` 证明具体请求已落链。停止其他 writer 后再核对，
 回读不一致时保留 Pending，按 [RUNBOOK.md](RUNBOOK.md) 调查，不自动清除。
+
+## 暂停、状态和预检
+
+```bash
+hip3-oracle --config config/testnet.local.json status
+hip3-oracle --config config/testnet.local.json pause --reason 'investigating provider disagreement'
+# 从 pause/status 输出取得本次暂停的 id。
+hip3-oracle --config config/testnet.local.json resume --pause-id '<pause-id>' --reason 'provider incident resolved'
+hip3-oracle --config config/testnet.local.json preflight
+```
+
+这些命令不需要私钥。`status` 是离线文件快照，不创建状态目录，也不能证明进程或链上状态健康。
+`preflight` 读取行情并运行实际聚合/风控；Live 还查询 DEX 的完整资产和精度。它不签名、不提交、不写状态，
+但会消耗供应商和 info API 的查询额度；不会检查 updater 权限。`ok=true` 只代表检查时的数据与前提通过。
+
+`pause` 在下一周期阻止采集和发布，进程输出 `status=paused`，readiness 变为 false；恢复要求匹配的暂停 ID。
+暂停/恢复均使用本地写锁，碰到正在执行的周期会失败，需要等该周期结束再重试。
+恢复不会清除 Pending、重置价格参考或解除跳价熔断；本地暂停不调用 `haltTrading`，也不撤销已发送请求。
+
+新写入的状态使用 schema v3，保存 `pause`；已有带 scope 的 v2 状态在下一次写入时保留数据并升级。
+旧 v2-only 程序会拒绝读取 v3，避免降级时忽略暂停。不要同时运行不同版本或不同状态路径的 updater。
+
+`run` 收到 SIGTERM/SIGINT 后完成当前周期、保存确认或 Pending 结果，然后关闭监控和审计资源。
+Docker/进程管理器应预留大于一个完整周期的停机宽限时间。
 
 ## 监控、审计与部署
 
@@ -227,6 +257,7 @@ Dry-run 的 ready 只代表模拟流程健康；指标 `hip3_oracle_live_mode=0`
 
 ```bash
 hip3-oracle replay --journal state/oracle-state.testnet.dry-run.demo.audit.jsonl
+hip3-oracle replay --journal examples/synthetic-replay.jsonl
 docker compose up --build
 ```
 
@@ -235,3 +266,5 @@ Compose 默认运行 Dry-run，使用非 root 容器和持久状态卷；模板�
 详见 [RUNBOOK.md](RUNBOOK.md) 的部署、故障排查与环境迁移说明。
 
 详见 [SECURITY.md](SECURITY.md)。
+模拟数据说明位于 [examples/README.md](examples/README.md)，本次验证记录位于
+[docs/validation/0.3.0.md](docs/validation/0.3.0.md)。

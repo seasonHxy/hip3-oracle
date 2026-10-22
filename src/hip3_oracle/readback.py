@@ -50,7 +50,7 @@ class HyperliquidReader:
         request = urllib.request.Request(
             base_url + "/info",
             data=json.dumps({"type": "metaAndAssetCtxs", "dex": self.config.dex}).encode(),
-            headers={"Content-Type": "application/json", "User-Agent": "hip3-oracle/0.2"},
+            headers={"Content-Type": "application/json", "User-Agent": "hip3-oracle/0.3"},
             method="POST",
         )
         try:

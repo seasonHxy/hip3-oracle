@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 — 2026-10-22
+
+- Add durable local `pause`/`resume` controls with incident IDs, recorded reasons and protection against stale resume commands.
+- Add offline `status` snapshots and key-free `preflight` checks using the same collection, aggregation and risk pipeline as publishing.
+- Verify source identity, independence group and weight against configuration before a quote can participate.
+- Handle SIGTERM/SIGINT by finishing the current cycle, closing resources and exiting without starting another cycle.
+- Add six clearly marked synthetic replay records and CLI, state-migration, control, diagnostic and real-process signal tests.
+- Reject empty evaluated events and non-object journal records rather than accepting vacuous replay success.
+- Exclude four confirmed credential-theft assets discovered in upstream history; disable their workflows and retain an incident record.
+- Write state schema v3 so older v2-only writers reject the new pause state. Scoped v2 references migrate on the next write;
+  pending publications and reference prices are preserved. Unscoped v1 still needs explicit migration.
+
+Local pause only controls this publisher's state scope. It does not cancel an already in-flight transaction or halt DEX trading.
+All writers must run the upgraded code; no distributed fencing or signing-key permission check is implied by `preflight`.
+
 ## 0.2.0 — 2026-10-02
 
 - Add a default 40% independent-group weight-share cap, checked before and after MAD filtering.

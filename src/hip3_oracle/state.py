@@ -27,6 +27,7 @@ class JsonStateStore:
         self.path = path
         self.scope = dict(scope) if scope is not None else None
         self.pending: dict[str, Any] | None = None
+        self.pause: dict[str, Any] | None = None
         self.last_attempt_at_ms = 0
         self._feeds: dict[str, FeedState] = {}
         self._load()
@@ -39,11 +40,22 @@ class JsonStateStore:
                 raw = json.load(handle)
             if not isinstance(raw, dict):
                 raise StateError("state root must be an object")
-            if raw.get("version") not in {1, 2} or not isinstance(raw.get("feeds"), dict):
+            if raw.get("version") not in {1, 2, 3} or not isinstance(raw.get("feeds"), dict):
                 raise StateError("unsupported state format")
             if self.scope is not None and raw.get("scope") != self.scope:
                 raise StateError("state scope mismatch or legacy state: explicit migration is required")
             self.pending = raw.get("pending")
+            self.pause = raw.get("pause")
+            if self.pause is not None and (
+                not isinstance(self.pause, dict)
+                or not isinstance(self.pause.get("id"), str)
+                or not self.pause["id"]
+                or not isinstance(self.pause.get("reason"), str)
+                or len(self.pause["reason"].strip()) < 8
+                or type(self.pause.get("pausedAtMs")) is not int
+                or self.pause["pausedAtMs"] < 0
+            ):
+                raise StateError("invalid persisted pause")
             self.last_attempt_at_ms = int(raw.get("lastAttemptAtMs", 0))
             if self.last_attempt_at_ms < 0:
                 raise StateError("invalid last attempt timestamp")
@@ -80,6 +92,7 @@ class JsonStateStore:
         loaded = JsonStateStore(self.path, scope=self.scope)
         self._feeds = loaded._feeds
         self.pending = loaded.pending
+        self.pause = loaded.pause
         self.last_attempt_at_ms = loaded.last_attempt_at_ms
 
     def last_published_at_ms(self) -> int:
@@ -88,6 +101,8 @@ class JsonStateStore:
         )
 
     def prepare(self, action: dict[str, Any], values: Mapping[str, tuple[Decimal, int]]) -> None:
+        if self.pause is not None:
+            raise StateError("operator pause is active")
         if self.pending is not None:
             raise StateError("unresolved pending publication; reconcile before publishing again")
         now_ms = int(time.time() * 1000)
@@ -130,6 +145,33 @@ class JsonStateStore:
             self.pending = old_pending
             raise
 
+    def set_pause(self, pause: dict[str, Any] | None) -> None:
+        old_pause = self.pause
+        self.pause = pause
+        try:
+            self.save()
+        except StateError:
+            self.pause = old_pause
+            raise
+
+    def overview(self, coins: tuple[str, ...]) -> dict[str, Any]:
+        return {
+            "stateFile": str(self.path),
+            "exists": self.path.exists(),
+            "scope": self.scope,
+            "pause": self.pause,
+            "pending": {
+                "id": self.pending["id"],
+                "preparedAtMs": self.pending.get("preparedAtMs"),
+                "coins": sorted(self.pending["feeds"]),
+            }
+            if self.pending
+            else None,
+            "lastAttemptAtMs": self.last_attempt_at_ms,
+            "references": {coin: asdict(self._feeds[coin]) if coin in self._feeds else None for coin in coins},
+            "processHealth": "not_observed",
+        }
+
     def update(self, coin: str, price: Decimal, observed_at_ms: int, published_at_ms: int) -> None:
         if not price.is_finite() or price <= 0:
             raise StateError(f"refusing invalid state price for {coin}")
@@ -140,9 +182,10 @@ class JsonStateStore:
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 2,
+            "version": 3,
             "scope": self.scope,
             "pending": self.pending,
+            "pause": self.pause,
             "lastAttemptAtMs": self.last_attempt_at_ms,
             "feeds": {coin: asdict(state) for coin, state in sorted(self._feeds.items())},
         }
